@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>جنگ استان‌ها</title>
+<link rel="stylesheet" href="leaflet.css">
+<style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Tahoma; display: flex; height: 100vh; overflow: hidden; }
+    #map { flex: 1; }
+    #panel { width: 370px; background: #2c3e50; color: #ecf0f1; padding: 15px; overflow-y: auto; }
+    .btn { display: block; width: 100%; padding: 9px; margin: 5px 0; background: #3498db; color: white;
+           border: none; border-radius: 5px; cursor: pointer; font-family: Tahoma; font-size: 13px; text-align: right; }
+    .btn:hover { background: #2980b9; }
+    .btn:disabled { background: #7f8c8d; cursor: not-allowed; }
+    .btn.danger { background: #e74c3c; } .btn.danger:hover { background: #c0392b; }
+    .btn.success { background: #27ae60; } .btn.success:hover { background: #229954; }
+    .btn.warning { background: #e67e22; } .btn.warning:hover { background: #d35400; }
+    #log { background: #1a252f; padding: 10px; border-radius: 5px; height: 180px; overflow-y: auto;
+           font-size: 12px; margin-top: 10px; line-height: 1.7; }
+    .player-tag { display: inline-block; width: 14px; height: 14px; border-radius: 3px;
+                  vertical-align: middle; margin-left: 5px; border: 1px solid rgba(255,255,255,0.3); }
+    .section { background: #34495e; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
+    .info-line { font-size: 12px; margin: 3px 0; }
+    h3 { margin: 8px 0 5px; font-size: 14px; }
+    .leaflet-tooltip { font-family: Tahoma; font-size: 13px; direction: rtl; }
+    select { width: 100%; padding: 8px; margin: 5px 0; border-radius: 5px; background: #34495e;
+             color: white; border: 1px solid #3498db; font-family: Tahoma; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel"></div>
+
+<script src="leaflet.js"></script>
+<script src="provinces.js"></script>
+
+<script>
+/* =============================================================
+   PART 1: موتور اصلی بازی (inline — پیدا نشدن نداره!)
+   ============================================================= */
+var COLORS = ['#e74c3c', '#3498db', '#27ae60', '#f39c12', '#9b59b6'];
+var TOTAL_PROVINCES = IRAN_GEOJSON.features.length;
+var game = null;
+
+function relKey(a, b) { return Math.min(a, b) + '-' + Math.max(a, b); }
+function shuffle(arr) { for (var i = arr.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = arr[i]; arr[i] = arr[j]; arr[j] = t; } }
+function getProvinceName(f) { var p = f.properties || {}; return p['name:fa'] || p.name || p['name:en'] || 'نامشخص'; }
+
+function buildPanel() {
+    document.getElementById('panel').innerHTML =
+        '<h3>🎮 جنگ استان‌ها</h3>' +
+        '<div id="setup"><div class="section">' +
+            '<label style="font-size:13px">تعداد بازیکنان:</label>' +
+            '<select id="playerCount">' +
+                '<option value="2">۲ بازیکن</option>' +
+                '<option value="3">۳ بازیکن</option>' +
+                '<option value="4">۴ بازیکن</option>' +
+                '<option value="5">۵ بازیکن</option>' +
+            '</select>' +
+            '<button class="btn success" onclick="startGame()">🚀 شروع بازی</button>' +
+        '</div></div>' +
+        '<div id="game" style="display:none;">' +
+            '<div class="section" id="currentPlayerBox"></div>' +
+            '<div class="section" id="actionBox"></div>' +
+            '<button class="btn danger" id="endTurnBtn" onclick="endTurn()">⏭️ پایان نوبت</button>' +
+            '<div id="log"></div>' +
+        '</div>';
+}
+
+function startGame() {
+    var n = parseInt(document.getElementById('playerCount').value);
+    game = {
+        players: [], currentPlayerIndex: 0, provinceData: {}, relations: {},
+        turn: 1, map: null, layer: null, provinceLayers: {},
+        actionMode: null, attackUsed: false, gameOver: false, playerCount: n
+    };
+    for (var i = 0; i < n; i++) game.players.push({ id: i, name: 'بازیکن ' + (i + 1), color: COLORS[i], provinces: [] });
+    for (var a = 0; a < n; a++) for (var b = a + 1; b < n; b++) game.relations[relKey(a, b)] = 'peace';
+
+    var names = IRAN_GEOJSON.features.map(getProvinceName);
+    shuffle(names);
+    names.forEach(function (name, i) {
+        var ownerId = i % n;
+        game.provinceData[name] = { ownerId: ownerId };
+        game.players[ownerId].provinces.push(name);
+    });
+
+    document.getElementById('setup').style.display = 'none';
+    document.getElementById('game').style.display = 'block';
+
+    game.map = L.map('map', { center: [32.4279, 53.6880], zoom: 5, minZoom: 4, maxZoom: 9 });
+    game.layer = L.geoJSON(IRAN_GEOJSON, {
+        style: getProvinceStyle,
+        onEachFeature: function (f, lyr) {
+            var name = getProvinceName(f);
+            game.provinceLayers[name] = lyr;
+            lyr.bindTooltip(name, { direction: 'center', className: 'leaflet-tooltip' });
+            lyr.on('click', function () { onProvinceClick(name); });
+        }
+    }).addTo(game.map);
+    game.map.fitBounds(game.layer.getBounds());
+
+    renderAll();
+    log('🎮 بازی با ' + n + ' بازیکن شروع شد!');
+    log('👤 ' + game.players[0].name + ' شروع می‌کند.');
+}
+
+function getProvinceStyle(f) {
+    var name = typeof f === 'string' ? f : getProvinceName(f);
+    var data = game.provinceData[name];
+    var color = data ? game.players[data.ownerId].color : '#999';
+    var isCurrent = data && data.ownerId === game.currentPlayerIndex;
+    return { fillColor: color, weight: isCurrent ? 2.5 : 1.3,
+             color: isCurrent ? '#000' : '#fff', opacity: 1, fillOpacity: 0.72 };
+}
+function refreshMap() { game.layer.eachLayer(function (l) { l.setStyle(getProvinceStyle(l.feature)); }); }
+
+function onProvinceClick(name) {
+    if (game.gameOver) return;
+    var data = game.provinceData[name];
+    var me = game.players[game.currentPlayerIndex];
+    if (game.actionMode === 'attack') {
+        if (data.ownerId === me.id) { log('❌ این استان خودت است!'); return; }
+        var key = relKey(me.id, data.ownerId);
+        if (game.relations[key] === 'alliance') { log('⚠️ با این بازیکن اتحاد داری.'); return; }
+        if (game.relations[key] !== 'war') {
+            game.relations[key] = 'war';
+            log('📢 ' + me.name + ' به ' + game.players[data.ownerId].name + ' اعلام جنگ کرد!');
+        }
+        attemptAttack(name);
+        game.actionMode = null; game.attackUsed = true;
+        refreshMap(); renderAll();
+        return;
+    }
+    log('📍 ' + name + ' — مالک: ' + game.players[data.ownerId].name);
+}
+
+function attemptAttack(targetName) {
+    var me = game.players[game.currentPlayerIndex];
+    var targetData = game.provinceData[targetName];
+    var defender = game.players[targetData.ownerId];
+    var myRoll = Math.floor(Math.random() * 6) + 1 + Math.floor(me.provinces.length / 5);
+    var defRoll = Math.floor(Math.random() * 6) + 1 + Math.floor(defender.provinces.length / 5) + 1;
+    log('⚔️ ' + targetName + ': ' + me.name + ' (' + myRoll + ') در برابر ' + defender.name + ' (' + defRoll + ')');
+    if (myRoll > defRoll) {
+        var idx = defender.provinces.indexOf(targetName);
+        if (idx > -1) defender.provinces.splice(idx, 1);
+        me.provinces.push(targetName);
+        targetData.ownerId = me.id;
+        log('✅ ' + me.name + ' استان ' + targetName + ' را فتح کرد!');
+        if (me.provinces.length === TOTAL_PROVINCES) { endGame(me); return; }
+        if (defender.provinces.length === 0) log('💀 ' + defender.name + ' حذف شد!');
+    } else { log('❌ حمله ناموفق.'); }
+}
+
+function endGame(winner) {
+    game.gameOver = true;
+    log('🏆 ' + winner.name + ' تمام ایران را فتح کرد!');
+    document.getElementById('actionBox').innerHTML = '<b style="color:#f1c40f;font-size:15px">🏆 ' + winner.name + ' برنده شد!</b>';
+    document.getElementById('endTurnBtn').disabled = true;
+    setTimeout(function () { alert('🏆 ' + winner.name + ' برنده شد!'); }, 100);
+}
+
+function endTurn() {
+    if (game.gameOver) return;
+    var attempts = 0;
+    do {
+        game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.playerCount;
+        if (game.currentPlayerIndex === 0) game.turn++;
+        attempts++;
+    } while (game.players[game.currentPlayerIndex].provinces.length === 0 && attempts < game.playerCount * 2);
+    game.actionMode = null; game.attackUsed = false;
+    refreshMap(); renderAll();
+    log('⏭️ نوبت ' + game.players[game.currentPlayerIndex].name + ' (دور ' + game.turn + ')');
+}
+
+function renderAll() {
+    if (game.gameOver) return;
+    var me = game.players[game.currentPlayerIndex];
+    var others = game.players.filter(function (p) { return p.id !== me.id && p.provinces.length > 0; });
+    document.getElementById('currentPlayerBox').innerHTML =
+        '<b style="color:' + me.color + ';font-size:15px">' + me.name + '</b> — نوبت شما<br>' +
+        '<div class="info-line">🗺️ استان‌ها: ' + me.provinces.length + ' / ' + TOTAL_PROVINCES + '</div>' +
+        '<div class="info-line">🔄 دور: ' + game.turn + '</div>';
+
+    var act = '';
+    if (game.actionMode === 'attack') {
+        act = '<b style="color:#f39c12">⚔️ روی استان دشمن کلیک کن</b><br>' +
+            '<button class="btn" onclick="game.actionMode=null; renderAll()">لغو</button>';
+    } else if (game.actionMode === 'war') {
+        act = '<b style="color:#f39c12">📢 هدف جنگ:</b><br>';
+        others.forEach(function (p) { if (game.relations[relKey(me.id, p.id)] === 'peace')
+            act += '<button class="btn danger" onclick="doAction(' + p.id + ',\'war\')">' + p.name + '</button>'; });
+        act += '<button class="btn" onclick="game.actionMode=null; renderAll()">لغو</button>';
+    } else if (game.actionMode === 'peace') {
+        act = '<b style="color:#f39c12">🕊️ پیشنهاد صلح:</b><br>';
+        others.forEach(function (p) { if (game.relations[relKey(me.id, p.id)] === 'war')
+            act += '<button class="btn success" onclick="doAction(' + p.id + ',\'peace\')">' + p.name + '</button>'; });
+        act += '<button class="btn" onclick="game.actionMode=null; renderAll()">لغو</button>';
+    } else if (game.actionMode === 'alliance') {
+        act = '<b style="color:#f39c12">🤝 پیشنهاد اتحاد:</b><br>';
+        others.forEach(function (p) { if (game.relations[relKey(me.id, p.id)] === 'peace')
+            act += '<button class="btn success" onclick="doAction(' + p.id + ',\'alliance\')">' + p.name + '</button>'; });
+        act += '<button class="btn" onclick="game.actionMode=null; renderAll()">لغو</button>';
+    } else if (game.actionMode === 'break') {
+        act = '<b style="color:#f39c12">💔 شکستن اتحاد:</b><br>';
+        others.forEach(function (p) { if (game.relations[relKey(me.id, p.id)] === 'alliance')
+            act += '<button class="btn warning" onclick="doAction(' + p.id + ',\'break\')">' + p.name + '</button>'; });
+        act += '<button class="btn" onclick="game.actionMode=null; renderAll()">لغو</button>';
+    } else {
+        act += '<button class="btn danger" onclick="game.actionMode=\'attack\'; renderAll()"' + (game.attackUsed ? ' disabled' : '') + '>⚔️ حمله' + (game.attackUsed ? ' (استفاده شده)' : '') + '</button>' +
+            '<button class="btn danger" onclick="game.actionMode=\'war\'; renderAll()">📢 اعلام جنگ</button>' +
+            '<button class="btn success" onclick="game.actionMode=\'peace\'; renderAll()">🕊️ پیشنهاد صلح</button>' +
+            '<button class="btn success" onclick="game.actionMode=\'alliance\'; renderAll()">🤝 پیشنهاد اتحاد</button>' +
+            '<button class="btn warning" onclick="game.actionMode=\'break\'; renderAll()">💔 شکستن اتحاد</button>';
+    }
+    act += '<h3>روابط شما:</h3>';
+    others.forEach(function (p) {
+        var rel = game.relations[relKey(me.id, p.id)];
+        var label = { peace: '🕊️ صلح', war: '⚔️ جنگ', alliance: '🤝 اتحاد' }[rel];
+        act += '<div class="info-line"><span class="player-tag" style="background:' + p.color + '"></span>' + p.name + ' (' + p.provinces.length + ') — ' + label + '</div>';
+    });
+    document.getElementById('actionBox').innerHTML = act;
+}
+
+function doAction(targetId, action) {
+    var me = game.players[game.currentPlayerIndex];
+    var target = game.players[targetId];
+    var key = relKey(me.id, targetId);
+    if (action === 'war')          { game.relations[key] = 'war';      log('📢 ' + me.name + ' به ' + target.name + ' اعلام جنگ کرد!'); }
+    else if (action === 'peace')   { game.relations[key] = 'peace';    log('🕊️ ' + me.name + ' و ' + target.name + ' صلح کردند.'); }
+    else if (action === 'alliance'){ game.relations[key] = 'alliance'; log('🤝 ' + me.name + ' و ' + target.name + ' اتحاد بستند.'); }
+    else if (action === 'break')   { game.relations[key] = 'peace';    log('💔 ' + me.name + ' اتحاد با ' + target.name + ' را شکست.'); }
+    game.actionMode = null;
+    refreshMap(); renderAll();
+}
+
+function log(msg) {
+    var el = document.getElementById('log');
+    if (!el) return;
+    el.innerHTML = msg + '<br>' + el.innerHTML;
+    if (el.childNodes.length > 100) el.removeChild(el.lastChild);
+}
+
+function onGameReady() {
+    buildPanel();
+    console.log('✅ موتور بازی آماده است');
+}
+
+/* =============================================================
+   PART 2: لودر خودکار پچ‌ها — این بخش را دست نزن
+   ============================================================= */
+(function loadPatches() {
+    var MAX_PATCHES = 200;
+    function tryPatch(n) {
+        if (n > MAX_PATCHES) { onGameReady(); return; }
+        var s = document.createElement('script');
+        s.src = 'patch-' + n + '.js';
+        s.onload = function () {
+            console.log('✅ patch-' + n + '.js بارگذاری شد');
+            tryPatch(n + 1);
+        };
+        s.onerror = function () {
+            console.log('🛑 patch-' + n + '.js نیست — شروع بازی');
+            onGameReady();
+        };
+        document.body.appendChild(s);
+    }
+    tryPatch(1);
+})();
+</script>
+</body>
+</html>
